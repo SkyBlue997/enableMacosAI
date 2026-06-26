@@ -232,9 +232,9 @@ do_diagnose(){
 
   echo "## PCC 云端日志（近 3 分钟；只关系语气改写/图乐园/Reframe，端侧功能跟它无关）"
   { log show --last 3m --predicate 'process == "privatecloudcomputed"' 2>/dev/null \
-      | grep -iE 'finished successfully|3200[0-9]|RetryAfter|NWError|3205[0-9]|Insufficient inline|32080' \
+      | grep -iE 'finished successfully|3200[0-9]|32033|RetryAfter|retry-after|privacyProxyRateLimited|privacyProxyErrorDomain|private access token|Rate-limited for token issuer|NWError|3205[0-9]|Insufficient inline|32080' \
       | tail -8 | sed 's/^/  /'; } || true
-  echo "  （出现 'Ropes request finished successfully' = 云端正常；32001+RetryAfter = 被限流，停手等几小时）"
+  echo "  （出现 'Ropes request finished successfully' = 云端正常；32001/32033/RetryAfter/privacyProxyRateLimited = 被限流或取令牌失败，停手等几小时）"
   echo
   echo "════════════════ 诊断报告结束 ════════════════"
 }
