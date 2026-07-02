@@ -13,10 +13,12 @@ sudo ./install.sh
 ```
 
 脚本自动完成:检查 SIP / Apple Silicon、**移除会杀死 PCC 的 `amfi_get_out_of_my_way` boot-arg**、
-安装 kext + 配置开机自启、加载并刷新 Apple 智能守护进程。首次会提示你去
+安装 kext + 配置开机自启、加载并刷新 Apple 智能守护进程。若检测到 issue #26 里常见的
+`COUNTRY_BILLING` / `COUNTRY_LOCATION` 卡在 `2`,会自动执行一次缓存修复。首次会提示你去
 「系统设置 → 隐私与安全性」点一次 **允许** 后重启。
 
 ```bash
+sudo ./install.sh repair      # 修复 #26: COUNTRY_BILLING / COUNTRY_LOCATION 卡 2
 sudo ./install.sh status      # 体检:SIP / AMFI / region / kext / 资格 一览
 sudo ./install.sh diagnose    # 一键诊断:把所有关键状态打成一段纯文本(报 issue 直接贴这个)
 sudo ./install.sh uninstall   # 卸载,恢复原始区域
@@ -27,18 +29,56 @@ sudo ./install.sh uninstall   # 卸载,恢复原始区域
 ## 原理
 
 - 资格门的根因:`MGGetStringAnswer("RegionCode") == "CH"` → Apple 智能被关。
-- 该值**实时**来自 IORegistry `IOPlatformExpertDevice` 的 `region-info` 属性(`"CH/A"`),
-  并非任何 plist 缓存(macOS 27 的 eligibilityd 基于 SwiftData 实时重算,旧的改 plist / 锁
-  uchg 方法全部失效)。
+- 该值**实时**来自 IORegistry `IOPlatformExpertDevice` 的 `region-info` 属性(`"CH/A"`)。
+  kext 把源头改成 `LL/A`,但 macOS 27 beta 仍可能沿用已经生成过的
+  `eligibilityd` / `countryd` 旧 CN 缓存,这就是 issue #26 里 `region-info` 已正确、
+  但 `COUNTRY_BILLING` / `COUNTRY_LOCATION` 仍是 `2` 的根因。
 - 本 kext 匹配 `IOPlatformExpertDevice`,在 `start()` 里
   `setProperty("region-info", "LL/A")` + `setProperty("country-of-origin", "USA")`
   —— 全系统进程从**源头**读到美版,资格 / 模型下发 / 前端 UI 自然一通百通,无需逐进程注入。
+
+### 为什么原版会失败
+
+原版只做了“源头伪装”:kext 将 IORegistry 里的 `region-info` 从 `CH/A` 改成 `LL/A`。
+这一步对 `OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE` 有效,但不能保证系统里已经生成过的
+国家/账户相关缓存立刻失效。
+
+issue #26 的失败状态就是这种情况:
+
+```text
+region-info = LL/A
+kext 已加载 = 是
+OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE = 3
+OS_ELIGIBILITY_INPUT_COUNTRY_BILLING = 2
+OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION = 2
+```
+
+也就是说,设备区域已经被伪装成功,但 `eligibilityd` / `countryd` 仍在使用旧的 CN
+国家判断或旧 datastore。结果 GREYMATTER 仍然是 `2`,Apple 智能入口或 New Siri 看起来
+“不生效”。
+
+### 这个脚本做了什么改动
+
+- 新增 `sudo ./install.sh repair`,专门处理 #26 的 `COUNTRY_BILLING` /
+  `COUNTRY_LOCATION` 卡 `2`。
+- `install` 完成后会自动检测上述两项;如果 kext 已经生效但 GREYMATTER 仍没到 `4`,
+  会自动执行 repair。
+- repair 会先停止 `eligibilityd` / `countryd`,避免 daemon 在修复过程中马上重写缓存。
+- repair 会解锁并备份相关文件到 `/private/var/db/eligibilityd/RegionSpoof-backup-*`。
+- repair 会删除 `eligibilityd` 的 datastore,让系统基于当前 `LL/A` 状态重建 eligibility。
+- repair 会把已存在的 Apple 智能相关 eligibility status 修正到通过态,并补齐
+  `SIRI_MODE` 所需 answer。
+- repair 会用 plist 结构化解析把 `countryd` 缓存里的 `CN/CHN` 改成 `US/USA`。
+- repair 默认会用 `uchg` 锁住修复后的缓存,防止重启后回落;不想锁可以运行
+  `sudo REGIONSPOOF_NO_CACHE_LOCK=1 ./install.sh repair`。
+- `status` 现在会显示 `BILLING` / `LOCATION`,方便直接判断是否还卡在 #26。
+- `diagnose` 增加 `countryd` 缓存摘要;开机加载脚本也会刷新 `countryd`。
 
 ## 文件
 
 | 路径 | 作用 |
 |------|------|
-| `install.sh` | **一键安装 / 卸载 / 体检脚本** |
+| `install.sh` | **一键安装 / repair 修复 / 卸载 / 体检脚本** |
 | `src/RegionSpoof.cpp` | kext 源码(IOService,改 `region-info`) |
 | `src/kmod_info.c` | kext 入口声明,提供链接必需的 `_kmod_info` 符号 |
 | `src/Info.plist` | kext bundle 的 Info.plist(IOKitPersonalities 匹配 IOPlatformExpertDevice) |
@@ -105,6 +145,28 @@ system/com.apple.eligibilityd` 或重启:
 ```bash
 sudo /usr/libexec/PlistBuddy -c "Print :OS_ELIGIBILITY_DOMAIN_GREYMATTER:status" \
   /private/var/db/eligibilityd/eligibility.plist
+```
+
+若没过的是下面两项,就是 issue #26 的旧区域缓存问题:
+
+```text
+OS_ELIGIBILITY_INPUT_COUNTRY_BILLING = 2
+OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION = 2
+```
+
+直接运行:
+
+```bash
+sudo ./install.sh repair
+```
+
+它会停止 `eligibilityd` / `countryd`,备份原文件到
+`/private/var/db/eligibilityd/RegionSpoof-backup-*`,把相关 AI eligibility 状态修到通过态,
+把 `countryd` 缓存里的 CN 改成 US,清掉 datastore 后重启相关 daemon。默认会用 `uchg`
+锁住修复后的缓存以避免重启后回落;如只想试运行不锁文件,可用:
+
+```bash
+sudo REGIONSPOOF_NO_CACHE_LOCK=1 ./install.sh repair
 ```
 
 ### kext 没加载(`region` 仍是 CH)

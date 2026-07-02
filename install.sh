@@ -45,21 +45,281 @@ KEXT_SRC="$DIR/RegionSpoof.kext";              KEXT_DST="/Library/Extensions/Reg
 LOADER_SRC="$DIR/region-kext-load.sh";         LOADER_DST="/usr/local/bin/region-kext-load.sh"
 PLIST_SRC="$DIR/com.local.regionkext.plist";   PLIST_DST="/Library/LaunchDaemons/com.local.regionkext.plist"
 KEXT_ID="com.local.RegionSpoof";  DAEMON="system/com.local.regionkext"
-ELIG="/private/var/db/eligibilityd/eligibility.plist"
+ELIG_DIR="/private/var/db/eligibilityd"
+OS_ELIG_DIR="/private/var/db/os_eligibility"
+ELIG="$ELIG_DIR/eligibility.plist"
+INPUT_ELIG="$ELIG_DIR/eligibility_inputs.plist"
+OS_ELIG="$OS_ELIG_DIR/eligibility.plist"
+COUNTRYD="/private/var/db/com.apple.countryd/countryCodeCache.plist"
+PLISTBUDDY="/usr/libexec/PlistBuddy"
 
 # ───────── 状态探测 ─────────
 region_is_LL(){ ioreg -ard1 -c IOPlatformExpertDevice 2>/dev/null | plutil -p - 2>/dev/null | grep -q 4c4c2f41; }
 kext_loaded(){  kmutil showloaded --no-kernel-components 2>/dev/null | grep -qi regionspoof; }
-greymatter(){   /usr/libexec/PlistBuddy -c "Print :OS_ELIGIBILITY_DOMAIN_GREYMATTER:os_eligibility_answer_t" "$ELIG" 2>/dev/null; }
+greymatter(){   "$PLISTBUDDY" -c "Print :OS_ELIGIBILITY_DOMAIN_GREYMATTER:os_eligibility_answer_t" "$ELIG" 2>/dev/null; }
+gm_input(){     "$PLISTBUDDY" -c "Print :OS_ELIGIBILITY_DOMAIN_GREYMATTER:status:$1" "$ELIG" 2>/dev/null; }
 sip_off(){      csrutil status 2>/dev/null | grep -qi disabled; }
 amfi_off(){     nvram boot-args 2>/dev/null | grep -q amfi_get_out_of_my_way; }
+
+gm_country_stuck(){
+  local billing location
+  billing="$(gm_input OS_ELIGIBILITY_INPUT_COUNTRY_BILLING)"
+  location="$(gm_input OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION)"
+  [ "$billing" = "2" ] || [ "$location" = "2" ]
+}
 
 # ───────── AI 守护进程刷新 ─────────
 refresh_ai(){
   info "刷新 Apple 智能守护进程(清掉旧区域缓存)…"
-  for d in eligibilityd modelcatalogd modelmanagerd; do
+  for d in countryd eligibilityd modelcatalogd modelmanagerd; do
     launchctl kickstart -k "system/com.apple.$d" >/dev/null 2>&1 || true
   done
+}
+
+restart_user_ai(){
+  local uid
+  uid="${SUDO_UID:-}"
+  [ -n "$uid" ] && [ "$uid" != "0" ] || uid="$(stat -f %u /dev/console 2>/dev/null || true)"
+  [ -n "$uid" ] || return 0
+  for svc in com.apple.intelligenceflowd com.apple.assistantd com.apple.siriactionsd; do
+    launchctl kickstart -k "gui/$uid/$svc" >/dev/null 2>&1 || true
+  done
+}
+
+# macOS 27 上 eligibilityd/countryd 有时会在 region-info 已是 LL/A 后仍沿用旧的
+# CN 缓存,表现为 COUNTRY_BILLING / COUNTRY_LOCATION 卡在 2。
+unlock_region_state(){
+  local p
+  for p in "$ELIG" "$INPUT_ELIG" "$OS_ELIG" "$COUNTRYD" \
+           "$ELIG_DIR/datastore.data" "$ELIG_DIR/datastore.data-shm" "$ELIG_DIR/datastore.data-wal"; do
+    [ -e "$p" ] || continue
+    chflags nouchg "$p" >/dev/null 2>&1 || true
+    chmod u+rw,g+rw "$p" >/dev/null 2>&1 || true
+  done
+}
+
+lock_region_state(){
+  local p
+  [ "${REGIONSPOOF_NO_CACHE_LOCK:-0}" = "1" ] && { warn "按 REGIONSPOOF_NO_CACHE_LOCK=1 跳过缓存文件锁定。"; return; }
+  for p in "$ELIG" "$INPUT_ELIG" "$OS_ELIG" "$COUNTRYD"; do
+    [ -f "$p" ] || continue
+    chmod 444 "$p" >/dev/null 2>&1 || true
+    chflags uchg "$p" >/dev/null 2>&1 || true
+  done
+}
+
+backup_region_state(){
+  local stamp dst
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  dst="$ELIG_DIR/RegionSpoof-backup-$stamp"
+  mkdir -p "$dst" >/dev/null 2>&1 || { warn "无法创建备份目录 $dst"; return 1; }
+  if [ -f "$ELIG" ]       && ! cp -p "$ELIG"       "$dst/eligibilityd.eligibility.plist" 2>/dev/null; then warn "备份 $ELIG 失败"; return 1; fi
+  if [ -f "$INPUT_ELIG" ] && ! cp -p "$INPUT_ELIG" "$dst/eligibilityd.inputs.plist"       2>/dev/null; then warn "备份 $INPUT_ELIG 失败"; return 1; fi
+  if [ -f "$OS_ELIG" ]    && ! cp -p "$OS_ELIG"    "$dst/os_eligibility.plist"            2>/dev/null; then warn "备份 $OS_ELIG 失败"; return 1; fi
+  if [ -f "$COUNTRYD" ]   && ! cp -p "$COUNTRYD"   "$dst/countryCodeCache.plist"          2>/dev/null; then warn "备份 $COUNTRYD 失败"; return 1; fi
+  ok "原始缓存已备份到 $dst"
+  return 0
+}
+
+stop_region_state_daemons(){
+  info "停止 eligibilityd / countryd,避免修复时被马上重写…"
+  launchctl bootout system/com.apple.eligibilityd >/dev/null 2>&1 || true
+  launchctl bootout system/com.apple.countryd >/dev/null 2>&1 || true
+  pkill -9 eligibilityd >/dev/null 2>&1 || true
+  pkill -9 countryd >/dev/null 2>&1 || true
+}
+
+start_region_state_daemons(){
+  launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.countryd.plist >/dev/null 2>&1 || true
+  launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.eligibilityd.plist >/dev/null 2>&1 || true
+  launchctl kickstart -k system/com.apple.countryd >/dev/null 2>&1 || true
+  launchctl kickstart -k system/com.apple.eligibilityd >/dev/null 2>&1 || true
+}
+
+set_plist_existing(){
+  local plist path val label
+  plist="$1"; path="$2"; val="$3"; label="$4"
+  [ -f "$plist" ] || return 0
+  if "$PLISTBUDDY" -c "Print $path" "$plist" >/dev/null 2>&1; then
+    "$PLISTBUDDY" -c "Set $path $val" "$plist" >/dev/null 2>&1 && printf '    %s = %s\n' "$label" "$val"
+  fi
+}
+
+ensure_answer(){
+  local plist domain val
+  plist="$1"; domain="$2"; val="$3"
+  [ -f "$plist" ] || return 0
+  "$PLISTBUDDY" -c "Print :$domain" "$plist" >/dev/null 2>&1 || \
+    "$PLISTBUDDY" -c "Add :$domain dict" "$plist" >/dev/null 2>&1 || return 0
+  if "$PLISTBUDDY" -c "Print :$domain:os_eligibility_answer_t" "$plist" >/dev/null 2>&1; then
+    "$PLISTBUDDY" -c "Set :$domain:os_eligibility_answer_t $val" "$plist" >/dev/null 2>&1 || return 0
+  else
+    "$PLISTBUDDY" -c "Add :$domain:os_eligibility_answer_t integer $val" "$plist" >/dev/null 2>&1 || return 0
+  fi
+  printf '    %s answer_t = %s\n' "$domain" "$val"
+}
+
+set_answer_existing(){
+  local plist domain val
+  plist="$1"; domain="$2"; val="$3"
+  set_plist_existing "$plist" ":$domain:os_eligibility_answer_t" "$val" "$domain answer_t"
+}
+
+set_domain_statuses(){
+  local domain key
+  domain="$1"; shift
+  for key in "$@"; do
+    set_plist_existing "$ELIG" ":$domain:status:$key" 3 "$domain:$key"
+  done
+}
+
+repair_eligibility_domains(){
+  info "修复 Apple 智能 eligibility 状态…"
+  set_domain_statuses OS_ELIGIBILITY_DOMAIN_GREYMATTER \
+    OS_ELIGIBILITY_INPUT_COUNTRY_BILLING \
+    OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION \
+    OS_ELIGIBILITY_INPUT_DEVICE_AND_SIRI_LANGUAGE_MATCH \
+    OS_ELIGIBILITY_INPUT_DEVICE_CLASS \
+    OS_ELIGIBILITY_INPUT_DEVICE_LANGUAGE \
+    OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE \
+    OS_ELIGIBILITY_INPUT_DEVICE_SIRI_MODE \
+    OS_ELIGIBILITY_INPUT_EXTERNAL_BOOT_DRIVE \
+    OS_ELIGIBILITY_INPUT_GENERATIVE_MODEL_SYSTEM \
+    OS_ELIGIBILITY_INPUT_SHARED_IPAD \
+    OS_ELIGIBILITY_INPUT_SIRI_LANGUAGE
+
+  set_domain_statuses OS_ELIGIBILITY_DOMAIN_FOUNDATION_MODELS \
+    OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
+
+  set_domain_statuses OS_ELIGIBILITY_DOMAIN_AMERICIUM \
+    OS_ELIGIBILITY_INPUT_COUNTRY_BILLING \
+    OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION \
+    OS_ELIGIBILITY_INPUT_DEVICE_AND_SIRI_LANGUAGE_MATCH \
+    OS_ELIGIBILITY_INPUT_DEVICE_CLASS \
+    OS_ELIGIBILITY_INPUT_DEVICE_LANGUAGE \
+    OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE \
+    OS_ELIGIBILITY_INPUT_DEVICE_SIRI_MODE \
+    OS_ELIGIBILITY_INPUT_EXTERNAL_BOOT_DRIVE \
+    OS_ELIGIBILITY_INPUT_HAS_LINWOOD \
+    OS_ELIGIBILITY_INPUT_SHARED_IPAD \
+    OS_ELIGIBILITY_INPUT_SIRI_LANGUAGE
+
+  set_domain_statuses OS_ELIGIBILITY_DOMAIN_CALCIUM \
+    OS_ELIGIBILITY_INPUT_CHINA_CELLULAR \
+    OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
+
+  set_domain_statuses OS_ELIGIBILITY_DOMAIN_DUBNIUM \
+    OS_ELIGIBILITY_INPUT_COUNTRY_BILLING \
+    OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION \
+    OS_ELIGIBILITY_INPUT_DEVICE_AND_SIRI_LANGUAGE_MATCH \
+    OS_ELIGIBILITY_INPUT_DEVICE_CLASS \
+    OS_ELIGIBILITY_INPUT_DEVICE_LANGUAGE \
+    OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE \
+    OS_ELIGIBILITY_INPUT_SIRI_LANGUAGE
+
+  set_domain_statuses OS_ELIGIBILITY_DOMAIN_PERSONAL_QA OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
+  set_domain_statuses OS_ELIGIBILITY_DOMAIN_SIRI_WITH_APP_INTENTS OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
+  set_domain_statuses OS_ELIGIBILITY_DOMAIN_FORCED_SHUTTER_SOUND \
+    OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION \
+    OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
+
+  for domain in \
+    OS_ELIGIBILITY_DOMAIN_GREYMATTER \
+    OS_ELIGIBILITY_DOMAIN_FOUNDATION_MODELS \
+    OS_ELIGIBILITY_DOMAIN_TERBIUM \
+    OS_ELIGIBILITY_DOMAIN_AMERICIUM \
+    OS_ELIGIBILITY_DOMAIN_CALCIUM \
+    OS_ELIGIBILITY_DOMAIN_DUBNIUM \
+    OS_ELIGIBILITY_DOMAIN_PERSONAL_QA \
+    OS_ELIGIBILITY_DOMAIN_SIRI_WITH_APP_INTENTS; do
+    set_answer_existing "$ELIG" "$domain" 4
+  done
+
+  ensure_answer "$OS_ELIG" OS_ELIGIBILITY_DOMAIN_SIRI_MODE 4
+  ensure_answer "$OS_ELIG" OS_ELIGIBILITY_DOMAIN_SIRI_MODE_NEEDS_CONSENT 4
+
+  for domain in \
+    OS_ELIGIBILITY_DOMAIN_STRONTIUM \
+    OS_ELIGIBILITY_DOMAIN_XCODE_LLM \
+    OS_ELIGIBILITY_DOMAIN_AI_LABELING \
+    OS_ELIGIBILITY_DOMAIN_SWIFT_ASSIST; do
+    set_answer_existing "$OS_ELIG" "$domain" 4
+  done
+}
+
+repair_countryd(){
+  local py changed
+  [ -f "$COUNTRYD" ] || { warn "未找到 countryd 缓存,跳过地区缓存修复。"; return; }
+  py="$(command -v python3 || true)"
+  [ -n "$py" ] || { warn "未找到 python3,无法结构化修改 countryd plist。"; return; }
+  changed="$("$py" - "$COUNTRYD" <<'PY' 2>/dev/null
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as f:
+    data = plistlib.load(f)
+
+changed = 0
+
+def force_us(obj):
+    global changed
+    if isinstance(obj, dict):
+        for key in list(obj.keys()):
+            value = obj[key]
+            key_name = key.lower() if isinstance(key, str) else ""
+            if key_name in ("countrycode", "country_code"):
+                if value != "US":
+                    changed += 1
+                obj[key] = "US"
+            else:
+                obj[key] = force_us(value)
+        return obj
+    if isinstance(obj, list):
+        for i, value in enumerate(obj):
+            obj[i] = force_us(value)
+        return obj
+    if isinstance(obj, str):
+        if obj == "CN":
+            changed += 1
+            return "US"
+        if obj == "CHN":
+            changed += 1
+            return "USA"
+    return obj
+
+data = force_us(data)
+with open(path, "wb") as f:
+    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+
+print(changed)
+PY
+)"
+  if [ -n "$changed" ]; then
+    ok "countryd 地区缓存已改为 US($changed 处)"
+  else
+    warn "countryd 缓存未能修改,稍后可重跑 diagnose 看是否仍有 CN。"
+  fi
+}
+
+repair_region_caches(){
+  hr; info "修复 eligibilityd / countryd 旧区域缓存"
+  region_is_LL || warn "当前 region-info 还不是 LL/A;建议先批准并加载 kext 后再修复缓存。"
+  stop_region_state_daemons
+  unlock_region_state
+  if ! backup_region_state; then
+    start_region_state_daemons
+    die "备份失败,已停止修复。"
+  fi
+  rm -f "$ELIG_DIR/datastore.data" "$ELIG_DIR/datastore.data-shm" "$ELIG_DIR/datastore.data-wal" 2>/dev/null || true
+  repair_eligibility_domains
+  repair_countryd
+  lock_region_state
+  start_region_state_daemons
+  restart_user_ai
+  refresh_ai
+  sleep 3
+  ok "缓存修复完成。若 GREYMATTER 仍未变 4,请重启后再跑一次 status。"
 }
 
 # ───────── 装/启 LaunchDaemon(开机自动加载)─────────
@@ -140,6 +400,10 @@ EOS
 
   refresh_ai
   sleep 3   # 给 eligibilityd 重算的时间
+  if region_is_LL && [ "$(greymatter)" != "4" ] && gm_country_stuck; then
+    warn "检测到 #26 常见症状: COUNTRY_BILLING / COUNTRY_LOCATION 仍卡在 2,开始修复旧区域缓存…"
+    repair_region_caches
+  fi
   do_status quiet
   hr
   if region_is_LL && [ "$(greymatter)" = "4" ]; then
@@ -160,6 +424,8 @@ do_uninstall(){
   rm -f "$PLIST_DST" "$LOADER_DST"
   kmutil unload -b "$KEXT_ID" >/dev/null 2>&1 || true
   rm -rf "$KEXT_DST"
+  unlock_region_state
+  rm -f "$ELIG_DIR/datastore.data" "$ELIG_DIR/datastore.data-shm" "$ELIG_DIR/datastore.data-wal" 2>/dev/null || true
   ok "已移除 kext / LaunchDaemon / 加载脚本"
   refresh_ai
   hr; warn "重启后区域恢复为原始(CH),Apple 智能关闭。SIP 如需恢复:恢复模式里 csrutil enable。"
@@ -176,13 +442,21 @@ do_status(){
   printf '  %-14s %s\n' "kext 已加载:"   "$(kext_loaded && echo "${G}是${N}" || echo "${R}否${N}")"
   local gm; gm="$(greymatter)"
   printf '  %-14s %s\n' "GREYMATTER:"   "$([ "$gm" = "4" ] && echo "${G}4(eligible)${N}" || echo "${Y}${gm:-?}(4 才是开启)${N}")"
+  local billing location
+  billing="$(gm_input OS_ELIGIBILITY_INPUT_COUNTRY_BILLING)"
+  location="$(gm_input OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION)"
+  printf '  %-14s %s\n' "BILLING:"      "$([ "$billing" = "3" ] && echo "${G}3${N}" || echo "${Y}${billing:-?}${N}")"
+  printf '  %-14s %s\n' "LOCATION:"     "$([ "$location" = "3" ] && echo "${G}3${N}" || echo "${Y}${location:-?}${N}")"
   printf '  %-14s %s\n' "开机自启:"      "$([ -f "$PLIST_DST" ] && echo "${G}已装${N}" || echo "${Y}未装${N}")"
+  if [ "$gm" != "4" ] && gm_country_stuck; then
+    warn "BILLING / LOCATION 卡在 2,可运行: sudo ./install.sh repair"
+  fi
   [ "${1:-}" = "quiet" ] || hr
 }
 
 # ───────── 诊断报告(报 issue 用;纯文本,无颜色,方便整段复制)─────────
 do_diagnose(){
-  local osv osb model csr ba region gm kb hum
+  local osv osb model csr ba region gm kb hum country_lines
   echo "════════════════ RegionSpoof 诊断报告 ════════════════"
   echo "（把从上面这行 ═ 到最底下 ═ 的整段，原样贴进 GitHub issue）"
   echo
@@ -208,6 +482,19 @@ do_diagnose(){
   echo "  region-info: ${region:-未读到}"
   echo "    (含 4c4c2f41 = \"LL/A\" 美版✅ ；43482f41 = \"CH/A\" 国行❌，说明 kext 没生效)"
   echo "  kext 已加载: $(kext_loaded && echo '是 ✅' || echo '否 ❌')"
+  echo
+
+  echo "## 国家/地区缓存（countryd）"
+  if [ -f "$COUNTRYD" ]; then
+    country_lines="$(plutil -p "$COUNTRYD" 2>/dev/null | grep -E '"CN"|"CHN"|"US"|CountryCode' | head -20 || true)"
+    if [ -n "$country_lines" ]; then
+      printf '%s\n' "$country_lines" | sed 's/^/  /'
+    else
+      echo "  未发现 CN/US/CountryCode 明显条目"
+    fi
+  else
+    echo "  未找到 $COUNTRYD"
+  fi
   echo
 
   echo "## 资格 GREYMATTER（4=已开启，2=未开启）"
@@ -242,8 +529,9 @@ do_diagnose(){
 # ───────── 入口 ─────────
 case "${1:-install}" in
   install)        do_install ;;
+  repair|fix|deepfix) repair_region_caches; do_status ;;
   uninstall|remove) do_uninstall ;;
   status|verify|doctor) do_status ;;
   diagnose|report|log) do_diagnose ;;
-  *) echo "用法: sudo $0 [install|status|diagnose|uninstall]"; exit 1 ;;
+  *) echo "用法: sudo $0 [install|repair|status|diagnose|uninstall]"; exit 1 ;;
 esac
