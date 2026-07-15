@@ -92,6 +92,17 @@ sudo /usr/libexec/PlistBuddy -c 'Print :OS_ELIGIBILITY_DOMAIN_GREYMATTER:os_elig
 
 ## 故障排查
 
+### ChatGPT Extension 一直显示资产正在下载
+
+如果 ChatGPT Provider 已显示 `unavailable = 0`，但仍提示
+`Apple Intelligence assets need to finish downloading`，可以继续检查
+GMS、`SiriAvailability` 和 `com.apple.modelcatalog` Atomic Set。
+
+详见：
+
+[ChatGPT Extension 资产下载专项排障指南](docs/chatgpt-extension-asset-download-troubleshooting.md)
+
+
 > **拿不准卡在哪,先跑一键诊断:** `sudo ./install.sh diagnose` —— 它把 SIP / AMFI / region / kext /
 > GREYMATTER 逐项 / 模型大小 / PCC 日志一次性打成一段纯文本,对照下面各节即可定位。**提 issue 时也请直接贴这段输出**
 > (无隐私信息),否则很难帮你诊断。
