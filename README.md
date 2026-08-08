@@ -13,7 +13,9 @@ sudo ./install.sh
 ```
 
 脚本自动完成:检查 SIP / Apple Silicon、**移除会杀死 PCC 的 `amfi_get_out_of_my_way` boot-arg**、
-安装 kext + 配置开机自启、加载并刷新 Apple 智能守护进程。首次会提示你去
+安装 kext + 配置开机自启、加载并刷新 Apple 智能守护进程，并将
+`/private/var/db/com.apple.countryd/countryCodeCache.plist` 中的国家代码强制改为 `US`。
+首次会提示你去
 「系统设置 → 隐私与安全性」点一次 **允许** 后重启。
 
 ```bash
@@ -33,6 +35,13 @@ sudo ./install.sh uninstall   # 卸载,恢复原始区域
 - 本 kext 匹配 `IOPlatformExpertDevice`,在 `start()` 里
   `setProperty("region-info", "LL/A")` + `setProperty("country-of-origin", "USA")`
   —— 全系统进程从**源头**读到美版,资格 / 模型下发 / 前端 UI 自然一通百通,无需逐进程注入。
+- 安装流程会强制修改 `countryCodeCache.plist`:脚本先备份原文件，将 plist 转为 XML，
+  把其中两位大写国家代码替换为 `US`，再转回二进制并通过 `444 + uchg` 锁定，防止
+  `countryd` 自动覆盖。此步骤沿用 `enableAppleAI` 的实现方式。
+
+> ⚠️ 强制 `countryd` 为 `US` 可能导致中国大陆高德版苹果地图不可用。如果使用 iPhone
+> 镜像，请在修改国家代码前先完成 iPhone 与 Mac 的配对。卸载脚本只解除文件锁定，
+> 不会自动用 `.bak` 覆盖当前缓存。
 
 ## 文件
 
