@@ -46,6 +46,7 @@ LOADER_SRC="$DIR/region-kext-load.sh";         LOADER_DST="/usr/local/bin/region
 PLIST_SRC="$DIR/com.local.regionkext.plist";   PLIST_DST="/Library/LaunchDaemons/com.local.regionkext.plist"
 KEXT_ID="com.local.RegionSpoof";  DAEMON="system/com.local.regionkext"
 ELIG="/private/var/db/eligibilityd/eligibility.plist"
+COUNTRYD_PLIST="/private/var/db/com.apple.countryd/countryCodeCache.plist"
 
 # ───────── 状态探测 ─────────
 region_is_LL(){ ioreg -ard1 -c IOPlatformExpertDevice 2>/dev/null | plutil -p - 2>/dev/null | grep -q 4c4c2f41; }
@@ -60,6 +61,32 @@ refresh_ai(){
   for d in eligibilityd modelcatalogd modelmanagerd; do
     launchctl kickstart -k "system/com.apple.$d" >/dev/null 2>&1 || true
   done
+}
+
+# ───────── 强制物理国家缓存为 US ─────────
+force_us_location(){
+  info "开始修改 countryd 国家代码缓存…"
+  if [ ! -f "$COUNTRYD_PLIST" ]; then
+    err "未找到 $COUNTRYD_PLIST,无法强制物理国家缓存。"
+    return 1
+  fi
+
+  info "解锁并备份 countryd plist"
+  chflags nouchg "$COUNTRYD_PLIST" || return 1
+  chmod 777 "$COUNTRYD_PLIST" || return 1
+  cp "$COUNTRYD_PLIST" "${COUNTRYD_PLIST}.bak" || return 1
+
+  plutil -convert xml1 "$COUNTRYD_PLIST" || return 1
+  local new_country_code="US"
+  local awk_script='/^[[:space:]]*<string>[A-Z][A-Z]<\/string>[[:space:]]*$/{indent="";if(match($0,/^[[:space:]]*/)){indent=substr($0,RSTART,RLENGTH)}printf "%s<string>%s</string>\n",indent,"'"$new_country_code"'";next}{print $0}'
+  local temp_plist="/tmp/temp_countryd.plist"
+  awk "$awk_script" "$COUNTRYD_PLIST" > "$temp_plist" || return 1
+  mv "$temp_plist" "$COUNTRYD_PLIST" || return 1
+  plutil -convert binary1 "$COUNTRYD_PLIST" || return 1
+
+  chmod 444 "$COUNTRYD_PLIST" || return 1
+  chflags uchg "$COUNTRYD_PLIST" || return 1
+  ok "物理国家缓存已强制修改为 US 并锁定"
 }
 
 # ───────── 装/启 LaunchDaemon(开机自动加载)─────────
@@ -138,6 +165,9 @@ EOS
     fi
   fi
 
+  hr
+  warn "即将强制物理国家缓存为 US；这可能停用中国大陆高德版苹果地图。"
+  force_us_location || die "修改 countryd 国家代码缓存失败,安装未完成。"
   refresh_ai
   sleep 3   # 给 eligibilityd 重算的时间
   do_status quiet
@@ -161,6 +191,11 @@ do_uninstall(){
   kmutil unload -b "$KEXT_ID" >/dev/null 2>&1 || true
   rm -rf "$KEXT_DST"
   ok "已移除 kext / LaunchDaemon / 加载脚本"
+  if [ -f "$COUNTRYD_PLIST" ]; then
+    chflags nouchg "$COUNTRYD_PLIST" 2>/dev/null || true
+    chmod 644 "$COUNTRYD_PLIST" 2>/dev/null || true
+    ok "已解除 countryd 国家代码缓存的锁定"
+  fi
   refresh_ai
   hr; warn "重启后区域恢复为原始(CH),Apple 智能关闭。SIP 如需恢复:恢复模式里 csrutil enable。"
   hr
@@ -177,6 +212,7 @@ do_status(){
   local gm; gm="$(greymatter)"
   printf '  %-14s %s\n' "GREYMATTER:"   "$([ "$gm" = "4" ] && echo "${G}4(eligible)${N}" || echo "${Y}${gm:-?}(4 才是开启)${N}")"
   printf '  %-14s %s\n' "开机自启:"      "$([ -f "$PLIST_DST" ] && echo "${G}已装${N}" || echo "${Y}未装${N}")"
+  printf '  %-14s %s\n' "countryd 缓存:" "$([ -f "$COUNTRYD_PLIST" ] && plutil -p "$COUNTRYD_PLIST" 2>/dev/null | grep -q '"US"' && echo "${G}US${N}" || echo "${Y}非 US / 未找到${N}")"
   [ "${1:-}" = "quiet" ] || hr
 }
 
