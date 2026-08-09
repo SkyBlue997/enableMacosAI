@@ -26,7 +26,7 @@ banner(){
   printf '%s\n' "$C"
   cat <<'EOF'
   ╔════════════════════════════════════════════════════╗
-  ║   RegionSpoof · 国行 Mac 开启 Apple 智能  (macOS 27)  ║
+  ║ RegionSpoof · 国行 Mac 开启 Apple 智能  (macOS 27) ║
   ╚════════════════════════════════════════════════════╝
 EOF
   printf '%s' "$N"
