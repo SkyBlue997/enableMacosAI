@@ -61,8 +61,11 @@ sudo ./install.sh uninstall   # 卸载,恢复原始区域
 
 ## 前置条件(Apple Silicon)
 
-1. **允许第三方 kext** —— 推荐在恢复模式(1TR)运行 `csrutil enable --without kext`；如系统
-   不接受再用 `csrutil disable`。前者保留更多 SIP 保护。
+1. **允许第三方 kext（两道独立闸门，顺序不能反）** —— ① 恢复模式「实用工具 → 启动安全性
+   实用工具」→ 选「**降低安全性**」→ 勾选「**允许用户管理来自被认可开发者的内核扩展**」；
+   ② **同一恢复模式终端**再运行 `csrutil enable --without kext`（选择降低安全性会重置 SIP
+   标志，ad-hoc 签名的 kext 需要这一步的验签豁免）。只做②不做①是最常见的坑：批准能成功、
+   设置里却没有任何可点的「允许」，`kmutil load` 永远报 not approved（见「故障排查」）。
 2. `nvram boot-args` 里**不能**有 `amfi_get_out_of_my_way=1`。安装器只检测并移除这个显式
    AMFI 绕过参数；它不会再仅凭 boot-arg 为空就宣称“AMFI/PCC 已正常”。
 3. kext 首次加载需在 **系统设置 → 隐私与安全性** 里点 **Allow** 后重启。
@@ -172,6 +175,13 @@ PCC 走的是 Apple 私有中继,普通的系统 HTTP 代理对它无效。多�
 - **kext 签名检查仍开启** → 回恢复模式运行 `csrutil enable --without kext`（或完整
   `csrutil disable`）；
 - **没批准** → `kmutil load -p` 报 not approved → 系统设置 → 隐私与安全性 → **Allow** → 重启;
+- **已批准（KextPolicy `allowed=1`）却仍报 not approved，且设置里没有可点的横幅** → 卡在
+  **本地启动策略**这道独立闸门：启动安全性实用工具未允许第三方 kext，aux KC 无法激活，
+  每次开机会被 kernelmanagerd 删掉（日志 `auxiliary extensions not allowed - skipping
+  activation logic`）。旁证：隐私与安全性出现「your current security settings prevent the
+  installation of system extensions」横幅（闸门打开后消失）；`sudo bputil -d` 里
+  `User Authorized Kext List Hash (auxp): absent`。按「前置条件」第 1 条的两步**顺序**处理
+  后重启；aux KC 构建/激活可能需要**两次开机**（FileVault 机器建议尽快输密码）。案例：#42、#79。
 - **`Authenticating extension failed: Bad code signature`** → 先用 `csrutil status` 确认输出里
   `Kext Signing: disabled`。不要仅按“部分/完整 SIP”猜测；macOS 27 已有仅 kext 豁免成功案例；
 - **系统版本差异** → 太新/太旧的 macOS 可能验签或 KPI 不符,需用 `BUILD.md` 从源码重编。
