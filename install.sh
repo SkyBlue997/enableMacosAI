@@ -67,6 +67,23 @@ amfi_bypass_bootarg(){
 }
 amfi_launch_constraints(){ sysctl -n security.mac.amfi.launch_constraints_enforced 2>/dev/null || echo '?'; }
 
+# 闸门②:本地启动策略未允许第三方 kext(与 SIP 的 kext 豁免相互独立)。
+# 直接证据是本次开机的 kernelmanagerd 日志;auxp absent 只是旁证(全新机器也可能 absent)。
+auxkc_gate_blocked(){
+  kext_loaded && return 1
+  region_is_LL && return 1
+  local bootsec since
+  bootsec="$(sysctl -n kern.boottime | sed -E 's/^\{ sec = ([0-9]+),.*/\1/')"
+  if [ -n "$bootsec" ] && [ "$bootsec" -gt 0 ] 2>/dev/null; then
+    since="$(date -r "$bootsec" '+%Y-%m-%d %H:%M:%S')"
+    log show --start "$since" --predicate 'process == "kernelmanagerd"' --info 2>/dev/null \
+      | grep -q 'auxiliary extensions not allowed'
+  else
+    log show --last 48h --predicate 'process == "kernelmanagerd"' --info 2>/dev/null \
+      | grep -q 'auxiliary extensions not allowed'
+  fi
+}
+
 # ───────── AI 守护进程刷新 ─────────
 refresh_ai(){
   info "刷新 Apple 智能守护进程(清掉旧区域缓存)…"
@@ -165,6 +182,9 @@ do_install(){
   2. 拉到最底部 → 找到「com.local.RegionSpoof 被阻止」→ 点 [允许 / Allow]
   3. 重启 Mac
 重启后本项目的 LaunchDaemon 会自动加载 kext。若仍未开启,再跑一次本脚本即可。
+若设置里根本没有可点的「允许」、重启后 kext 仍未加载 → 多半卡在「本地启动策略」这道
+独立闸门:恢复模式 → 启动安全性实用工具 → 降低安全性 → 勾「允许用户管理内核扩展」,
+再 csrutil enable --without kext,重启(可能需两次开机)。详见 README 故障排查。
 EOS
       [ -n "$out" ] && printf '%s（kmutil 提示:%s）%s\n' "$C" "$(printf '%s' "$out" | tail -1)" "$N"
       exit 0
@@ -246,6 +266,12 @@ do_diagnose(){
   if amfi_bypass_bootarg; then echo "  AMFI boot-arg: ⚠️ 有 amfi_get_out_of_my_way，必须移除后重启"
   else echo "  AMFI boot-arg: 未发现显式绕过（这不等于 PCC 已通过）"; fi
   echo "  AMFI launch constraints: $(amfi_launch_constraints)"
+  if auxkc_gate_blocked; then
+    echo "  本地启动策略: ⚠️ 未允许第三方 kext（独立于 SIP 的另一道闸门，aux KC 无法激活）"
+    echo "          解法: 恢复模式 → 启动安全性实用工具 → 降低安全性 → 勾「允许用户管理内核扩展」，再 csrutil enable --without kext，重启（aux KC 可能需两次开机）"
+  else
+    echo "  本地启动策略: 未检测到阻塞（kext 已加载/区域已生效，或开机日志无该拦截）"
+  fi
   ba="$(nvram boot-args 2>/dev/null | sed 's/^boot-args[[:space:]]*//')"; [ -z "$ba" ] && ba='(空)'
   echo "  boot-args: $ba"
   echo "  本地安全策略摘要:"
