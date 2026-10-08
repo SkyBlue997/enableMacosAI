@@ -128,7 +128,12 @@ cd perapp-zh
 
 > **拿不准卡在哪,先跑一键诊断:** `sudo ./install.sh diagnose` —— 它把 SIP / AMFI / region / kext /
 > GREYMATTER 逐项 / 语言与汉化状态 / PCC 日志一次性打成一段纯文本,对照下面各节即可定位。**提 issue 时也请直接贴这段输出**
-> (无隐私信息),否则很难帮你诊断。
+> (分享前请脱敏),否则很难帮你诊断。
+
+如果 `region=LL/A`、kext 已加载，但资格文件长期不更新，并检查到 `uchg` / 只读权限，
+可参考[匿名案例：旧资格缓存锁定的检查与离线修复](docs/eligibility-cache-recovery.md)。
+这是特定机器的额外排障，不是通用安装前置；先确认故障、完整备份，再恢复系统自行更新资格的能力。
+公开分享诊断前请按教程删除账户、用户目录、设备标识等隐私信息。
 
 ### `region=LL/A` 和 kext 都已就位,但 `GREYMATTER` 仍是 `2`
 
