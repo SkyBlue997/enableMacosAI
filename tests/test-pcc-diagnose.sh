@@ -38,6 +38,15 @@ run_case rate_limited RATE_LIMITED \
   '2026-07-22 18:00:00.000 E privatecloudcomputed RetryAfterDate error 32001' \
   '2026-07-22 18:00:01.000 E privatecloudcomputed Ropes request failed'
 
+run_case rate_limited_code RATE_LIMITED \
+  '2026-07-22 18:00:00.000 E privatecloudcomputed Ropes error code=32001' \
+  '2026-07-22 18:00:01.000 E privatecloudcomputed Ropes request failed'
+
+# 32001 只是更长数字 / ID 的一部分时,不应判为限流
+run_case not_rate_limited_substring PCC_REQUEST_FAILED \
+  '2026-07-22 18:00:00.000 E privatecloudcomputed requestID=8a132001f7 pid=1320015' \
+  '2026-07-22 18:00:01.000 E privatecloudcomputed Ropes request failed'
+
 run_case cache_miss ATTESTATION_CACHE_MISS \
   '2026-07-22 18:00:00.000 E privatecloudcomputed AttestationStoreError store is empty' \
   '2026-07-22 18:00:01.000 E privatecloudcomputed Ropes request failed'

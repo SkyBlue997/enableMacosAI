@@ -76,7 +76,7 @@ backup_handler(){ [ -e "$BK/urlhandler" ] && return 0; local h; h=$("$LSH" get x
 # ── 逐 App 写入 / 恢复 ──
 set_lang(){ # $1=bundle id  $2=沙盒(0/1)  [$3=noreg:不登记到面板]
   [ -z "$1" ] && return 0
-  if banned "$1"; then echo "  ⛔ 拒绝 $1(Siri 相关)"; return 0; fi
+  if banned "$1"; then echo "  ✗ 拒绝 $1(Siri 相关)"; return 0; fi
   backup_registry
   if [ "$2" = 1 ] && [ ! -d "$HOME/Library/Containers/$1" ]; then echo "  ↷ 跳过 $1(沙盒容器不存在=从未运行,首次运行后再加)"; SKIPPED=$((SKIPPED+1)); return 0; fi
   local d v; d="$(domain "$1" "$2")"; [ "$2" = 1 ] && mkdir -p "$(dirname "$d")"
@@ -180,7 +180,7 @@ case "${1:-}" in
       if excluded "$id"; then xl="$xl $(basename "$a" .app)"; continue; fi
       if sandboxed "$a"; then s=$((s+1)); else n=$((n+1)); fi; done < <(apple_apps)
     echo "【apple 自带 App】 非沙盒 $n 个(直接写域)+ 沙盒 $s 个(写容器路径)"
-    echo "   跳过·Apple 面板硬排除:$xl"; echo "   ⛔禁止·Siri 相关:$bl"
+    echo "   跳过·Apple 面板硬排除:$xl"; echo "   ✗禁止·Siri 相关:$bl"
     echo "【shell】 ${EXTRA//:[01]/}"
     echo "【widgets】 $(find /System/Applications /System/Library/CoreServices /Applications -maxdepth 7 -name '*.appex' 2>/dev/null | while read -r x; do defaults read "$x/Contents/Info" NSExtension 2>/dev/null | grep -q 'com.apple.widgetkit-extension' && has_zh "$x" && echo x; done | wc -l | tr -d ' ') 个 WidgetKit 小组件扩展含简中"
     echo "【settings】 $(pane_appexes | while read -r x; do has_zh "$x" && echo x; done | wc -l | tr -d ' ') 个系统设置面板扩展含简中 + 常驻代理"
@@ -195,11 +195,11 @@ case "${1:-}" in
           if sudo defaults write /Library/Preferences/.GlobalPreferences AppleLanguages -array "${LANGS[@]}"; then echo "  ✓ 登录窗 → ${LANGS[0]}(原值已备份)"; else echo "  ✗ 写入失败"; FAILED=1; fi; check ;;
   widgets) find /System/Applications /System/Library/CoreServices /Applications -maxdepth 7 -name '*.appex' 2>/dev/null | while read -r x; do
             defaults read "$x/Contents/Info" NSExtension 2>/dev/null | grep -q 'com.apple.widgetkit-extension' || continue; has_zh "$x" || continue; id=$(bid "$x"); [ -n "$id" ] && echo "$id"; done | sort -u > "$STATE/widgets.ids"
-          while read -r id; do siri_like "$id" && { echo "  ⛔ 跳过 $id"; continue; }; set_lang "$id" 1 noreg; done < "$STATE/widgets.ids"
+          while read -r id; do siri_like "$id" && { echo "  ✗ 跳过 $id"; continue; }; set_lang "$id" 1 noreg; done < "$STATE/widgets.ids"
           killall chronod NotificationCenter 2>/dev/null; summary; check ;;
   settings)
     echo "── 系统设置面板扩展(容器域,eligibilityd 不读)──"
-    while read -r x; do has_zh "$x" || continue; id=$(bid "$x"); [ -z "$id" ] && continue; siri_like "$id" && { echo "  ⛔ 跳过 $id"; continue; }
+    while read -r x; do has_zh "$x" || continue; id=$(bid "$x"); [ -z "$id" ] && continue; siri_like "$id" && { echo "  ✗ 跳过 $id"; continue; }
       set_lang "$id" 1 noreg >/dev/null; done < <(pane_appexes); kill_panes; echo "  ✓ 面板扩展已写入(已记入 manifest)"
     install_agent || FAILED=$((FAILED+1)); quit_settings; summary; check
     echo "  提示:Dock 里请钉真正的「系统设置」(单图标);任何入口打开都会是中文" ;;

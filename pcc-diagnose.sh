@@ -9,10 +9,10 @@ if [ -t 1 ]; then
   G=$'\033[0;32m'; Y=$'\033[1;33m'; R=$'\033[0;31m'; B=$'\033[0;34m'; N=$'\033[0m'
 else G=''; Y=''; R=''; B=''; N=''; fi
 
-info(){ printf '%s▶%s %s\n' "$B" "$N" "$1"; }
-ok(){ printf '%s✅ %s%s\n' "$G" "$1" "$N"; }
-warn(){ printf '%s⚠️  %s%s\n' "$Y" "$1" "$N"; }
-err(){ printf '%s❌ %s%s\n' "$R" "$1" "$N"; }
+info(){ printf '%s==>%s %s\n' "$B" "$N" "$1"; }
+ok(){ printf '%s✓ %s%s\n' "$G" "$1" "$N"; }
+warn(){ printf '%s! %s%s\n' "$Y" "$1" "$N"; }
+err(){ printf '%s✗ %s%s\n' "$R" "$1" "$N"; }
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 if [ "$(id -u)" -ne 0 ] && [ -z "${PCC_DIAG_LOG_FILE:-}" ]; then
@@ -137,7 +137,8 @@ elif printf '%s\n' "$terminal_line" | grep -qi 'finished successfully'; then
   fi
 else
   echo "  最近请求: 失败 ($(timestamp_of "$terminal_line"))"
-  if grep -qiE '32001|RetryAfter' "$CONTEXT_FILE"; then
+  # 32001 必须是独立的数字,避免命中时间戳、PID、十六进制 ID 里恰好含 32001 的片段
+  if grep -qiE '(^|[^0-9A-Fa-f])32001([^0-9A-Fa-f]|$)|RetryAfter' "$CONTEXT_FILE"; then
     err "分类: RATE_LIMITED（Apple 服务端限流）"
     echo "  停止重复点击，等 RetryAfter 指定时间；日志没有时间时至少等数小时。"
   elif grep -qiE 'NWError[^0-9]*Code[=:][[:space:]]*89|32057|32080|Insufficient inline' "$CONTEXT_FILE" \
