@@ -6,6 +6,7 @@
 # 用法:
 #   sudo ./install.sh             安装 / 升级(默认;重复运行即升级)
 #   sudo ./install.sh status      查看状态 / 体检
+#   sudo ./install.sh refresh     区域已生效时重新计算资格（不改 SIP）
 #   sudo ./install.sh diagnose    一键诊断（报 issue 贴这个）
 #   sudo ./install.sh pcc         只读诊断 PCC 云端链路
 #   sudo ./install.sh uninstall   卸载
@@ -134,9 +135,19 @@ elig_stale_reason(){
 # ───────── AI 守护进程刷新 ─────────
 refresh_ai(){
   info "刷新 Apple 智能守护进程(清掉旧区域缓存)…"
-  for d in eligibilityd modelcatalogd modelmanagerd; do
-    launchctl kickstart -k "system/com.apple.$d" >/dev/null 2>&1 || true
-  done
+  [ -f "$LOADER_SRC" ] || { err "缺少 $LOADER_SRC"; return 1; }
+  /bin/bash "$LOADER_SRC" --refresh-only
+}
+
+do_refresh(){
+  banner
+  region_is_LL || die "region 尚未变为 LL/A，请先检查 kext：sudo ./install.sh diagnose"
+  local rc=0
+  refresh_ai || rc=$?
+  do_status quiet
+  [ "$rc" = 0 ] || { err "本次资格刷新未验证成功，请检查上面的原始错误。"; return "$rc"; }
+  [ "$(greymatter)" = 4 ] || { warn "资格已重新计算，但尚未通过；请检查 diagnose 的逐项输入。"; return 2; }
+  ok "GREYMATTER=4，资格已通过（PCC 需单独验证）"
 }
 
 # ───────── 去 quarantine(zip 下载的文件带此属性时,开机 LaunchDaemon 会被拒绝执行 → 重启后失效)─────────
@@ -275,7 +286,7 @@ EOS
 do_install(){
   banner; preflight
   hr; info "复制文件到系统目录"
-  local old_fp new_fp upgraded=0 out
+  local old_fp new_fp upgraded=0 out refresh_rc=0
   old_fp="$(kext_fingerprint "$KEXT_DST")"; new_fp="$(kext_fingerprint "$KEXT_SRC")"
   if [ -n "$old_fp" ] && [ "$old_fp" = "$new_fp" ]; then
     ok "kext 已是当前版本,无需替换 ($KEXT_DST)"
@@ -308,12 +319,14 @@ do_install(){
     fi
   fi
 
-  refresh_ai
-  sleep 3   # 给 eligibilityd 重算的时间
+  refresh_ai || refresh_rc=$?
   do_status quiet
   hr
   local stale; stale="$(elig_stale_reason)"
-  if [ -n "$stale" ]; then
+  if [ "$refresh_rc" != 0 ]; then
+    warn "本次资格刷新未验证成功；不能仅凭已有 plist 判断安装成功。"
+    echo "  查看上面的原始错误，处理后运行：sudo ./install.sh refresh"
+  elif [ -n "$stale" ]; then
     warn "资格结果不可信:$stale"
     echo "  处理方法见 README「资格文件被锁定」一节。"
   elif region_is_LL && [ "$(greymatter)" = "4" ]; then
@@ -325,6 +338,7 @@ do_install(){
     warn "尚未完全就绪 —— 多半还需批准 kext 并重启,或模型仍在下载;稍后用 'sudo ./install.sh status' 复查。"
   fi
   hr
+  return "$refresh_rc"
 }
 
 # ───────── 卸载 ─────────
@@ -335,7 +349,7 @@ do_uninstall(){
   kmutil unload -b "$KEXT_ID" >/dev/null 2>&1 || true
   rm -rf "$KEXT_DST"
   ok "已移除 kext / LaunchDaemon / 加载脚本"
-  refresh_ai
+  refresh_ai || warn "资格服务刷新失败；请重启以恢复原始区域并重新计算。"
   hr; warn "重启后区域恢复为原始(CH),Apple 智能关闭。SIP 如需恢复:恢复模式里 csrutil enable。"
   hr
 }
@@ -426,6 +440,7 @@ do_diagnose(){
   echo
 
   echo "## 资格 GREYMATTER（4=已开启，2=未开启）"
+  echo "  eligibilityd 进程: $(pgrep -x eligibilityd 2>/dev/null || echo '未运行（plist 可能是上次结果）')"
   gm="$(greymatter)"
   echo "  answer = ${gm:-未读到}  $([ "$gm" = "4" ] && echo '✓ 已开启' || echo '✗ 没到 4，AI 没真正打开')"
   local stale; stale="$(elig_stale_reason)"
@@ -474,7 +489,8 @@ case "${1:-install}" in
   install)        do_install ;;
   uninstall|remove) do_uninstall ;;
   status|verify|doctor) do_status ;;
+  refresh)        do_refresh ;;
   diagnose|report|log) do_diagnose ;;
   pcc|cloud) shift; exec "$PCC_DIAG" "$@" ;;
-  *) echo "用法: sudo $0 [install|status|diagnose|pcc|uninstall]"; exit 1 ;;
+  *) echo "用法: sudo $0 [install|status|refresh|diagnose|pcc|uninstall]"; exit 1 ;;
 esac
