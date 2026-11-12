@@ -183,7 +183,9 @@ sudo ./install.sh refresh
 `AFLanguageCodeDidChangeDarwinNotification`。这是该服务订阅的按需启动事件，不修改实际语言设置。
 仅终止服务不够，因为它不一定自行重新启动；此时读 plist 仍可能得到旧结果。
 脚本会检查新 PID 和资格文件更新，并最多等待 30 秒让资格重算；超时、通知失败或文件锁定会明确报错。
-模型服务的刷新失败也会记录原始错误，不再笼统声称所有 AI 服务刷新成功。
+`modelcatalogd` 和 `modelmanagerd` 会先尝试 `kickstart -k`，被 SIP 拒绝时分别改用 `KILL` 和 `TERM`
+结束旧进程，由系统按需重新拉起（`modelcatalogd` 收到 `TERM` 会卡在退出流程，所以不用它）。
+两者刷新失败只记录提示，不影响资格结果。
 
 `refresh` 只处理当前会话。要让开机使用修正后的流程，更新项目后执行一次 `sudo ./install.sh`，
 将新版加载脚本复制到 `/usr/local/bin/region-kext-load.sh`。下次重启后用 `status` 与

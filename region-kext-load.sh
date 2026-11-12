@@ -86,14 +86,50 @@ refresh_eligibility(){
   fi
 }
 
-refresh_region_daemons(){
-  local rc=0 svc out
-  refresh_eligibility || rc=$?
-  for svc in com.apple.modelcatalogd com.apple.modelmanagerd; do
-    if ! out="$(/bin/launchctl kickstart -k "system/$svc" 2>&1)"; then
-      printf '%s WARNING: %s refresh failed: %s\n' "$(ts)" "$svc" "$out"
+daemon_pid(){ /usr/bin/pgrep -x "$1" 2>/dev/null | /usr/bin/head -1; }
+daemon_kickstart(){ /bin/launchctl kickstart -k "system/$1"; }
+daemon_signal(){ /usr/bin/killall "-$1" "$2"; }
+
+# Model daemons are demand-launched (no KeepAlive) and relaunch on their next client request,
+# so stopping them is enough. kickstart -k works when SIP allows it; otherwise fall back to a
+# per-daemon signal. Eligibility does not depend on them, so failures here are only notes.
+refresh_model_daemon(){ # $1=process name  $2=launchd label  $3=fallback signal (TERM|KILL)
+  local name="$1" label="$2" sig="$3" old_pid pid='' out method i
+  old_pid="$(daemon_pid "$name")"
+  if [ -z "$old_pid" ]; then
+    echo "$(ts) $name: not running, will start fresh on demand"
+    return 0
+  fi
+  if out="$(daemon_kickstart "$label" 2>&1)"; then
+    method='kickstart -k'
+  else
+    echo "$(ts) $name: kickstart -k denied (${out:-no output}); falling back to SIG$sig"
+    if ! out="$(daemon_signal "$sig" "$name" 2>&1)"; then
+      echo "$(ts) NOTE: $name: SIG$sig failed (${out:-no output}); not refreshed"
+      return 1
     fi
+    method="SIG$sig"
+  fi
+  for ((i=0; i<10; i++)); do
+    pid="$(daemon_pid "$name")"
+    [ "$pid" != "$old_pid" ] && break
+    sleep 1
   done
+  if [ "$pid" = "$old_pid" ]; then
+    echo "$(ts) NOTE: $name still pid=$old_pid 10 seconds after $method; not refreshed"
+    return 1
+  fi
+  echo "$(ts) $name refreshed via $method: pid=$old_pid -> ${pid:-not running yet (starts on demand)}"
+}
+
+refresh_region_daemons(){
+  local rc=0
+  refresh_eligibility || rc=$?
+  # modelcatalogd must not get TERM: it hangs in its exit path and never exits.
+  # SIGKILL matches what kickstart -k does to it.
+  refresh_model_daemon modelcatalogd com.apple.modelcatalogd KILL || true
+  # modelmanagerd exits cleanly on TERM and is relaunched immediately.
+  refresh_model_daemon modelmanagerd com.apple.modelmanagerd TERM || true
   return "$rc"
 }
 
