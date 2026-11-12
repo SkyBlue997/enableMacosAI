@@ -13,12 +13,8 @@
 
 ## 当前状态
 
-- **macOS 27.2（26B118）**：在 Mac15,9 / M3 Max 上 kext 已加载、`region-info=LL/A`、
+- **macOS 27.3 Beta（26C5035r）**：在 Mac15,9 / M3 Max 上 kext 已加载、`region-info=LL/A`、
   `GREYMATTER=4`，端侧模型与 PCC 云端功能均可用。
-- **macOS 27.3（26C5035r）本地验证**：保留 `csrutil enable --without kext` 时，使用
-  `TERM + AFLanguageCodeDidChangeDarwinNotification` 重新启动资格服务后，设备地区输入由 2 变为 3、
-  `GREYMATTER` 由 2 变为 4；安装新版脚本并重启后，开机日志也确认自动恢复到 4。
-  此次为单台 Mac mini 的验证，不代表其他机型、系统版本或 PCC 均已验证。
 
 ## 前置条件（Apple Silicon）
 

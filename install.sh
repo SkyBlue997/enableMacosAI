@@ -65,7 +65,7 @@ sip_allows_kext(){
 }
 amfi_bypass_bootarg(){
   nvram boot-args 2>/dev/null \
-    | grep -Eq '(^|[[:space:]])amfi_get_out_of_my_way(=[0-9]+)?([[:space:]]|$)'
+    | grep -Eq '(^|[[:space:]])amfi_get_out_of_my_way(=[^[:space:]]*)?([[:space:]]|$)'
 }
 amfi_launch_constraints(){ sysctl -n security.mac.amfi.launch_constraints_enforced 2>/dev/null || echo '?'; }
 
@@ -270,7 +270,7 @@ EOS
     local args new
     args="$(nvram boot-args 2>/dev/null | sed 's/^boot-args[[:space:]]*//')"
     new="$(printf '%s' "$args" \
-      | sed -E 's/(^|[[:space:]])amfi_get_out_of_my_way(=[0-9]+)?([[:space:]]|$)/ /g' \
+      | sed -E 's/(^|[[:space:]])amfi_get_out_of_my_way(=[^[:space:]]*)?([[:space:]]|$)/ /g' \
       | xargs || true)"
     if [ -z "$new" ]; then nvram -d boot-args 2>/dev/null || true; else nvram boot-args="$new" 2>/dev/null || true; fi
     if amfi_bypass_bootarg; then
