@@ -15,6 +15,10 @@
 
 - **macOS 27.2（26B118）**：在 Mac15,9 / M3 Max 上 kext 已加载、`region-info=LL/A`、
   `GREYMATTER=4`，端侧模型与 PCC 云端功能均可用。
+- **macOS 27.3（26C5035r）本地验证**：保留 `csrutil enable --without kext` 时，使用
+  `TERM + AFLanguageCodeDidChangeDarwinNotification` 重新启动资格服务后，设备地区输入由 2 变为 3、
+  `GREYMATTER` 由 2 变为 4；安装新版脚本并重启后，开机日志也确认自动恢复到 4。
+  此次为单台 Mac mini 的验证，不代表其他机型、系统版本或 PCC 均已验证。
 
 ## 前置条件（Apple Silicon）
 
@@ -53,6 +57,7 @@ sudo ./install.sh
 
 ```bash
 sudo ./install.sh status      # 体检：SIP / AMFI / region / kext / 资格 / 开机自启
+sudo ./install.sh refresh     # region 已是 LL/A 时重新计算资格，不改 SIP 或文件权限
 sudo ./install.sh diagnose    # 一键诊断：全部关键状态打成一段纯文本，报 issue 直接贴这个
 sudo ./install.sh pcc         # 只读分类最近 30 分钟的 PCC / 中继 / 令牌状态
 sudo ./install.sh uninstall   # 卸载，重启后恢复原始区域
@@ -148,7 +153,7 @@ sudo ./install.sh diagnose
 
 ### kext 已就位，但 `GREYMATTER` 仍是 2
 
-区域只是约 10 个资格输入之一，八成卡在**账户地区或语言**上（前置条件第 4、5 条）。查看各项输入：
+区域只是约 10 个资格输入之一，需检查**设备地区、账户地区和语言**等条件。查看各项输入：
 
 ```bash
 sudo /usr/libexec/PlistBuddy -c "Print :OS_ELIGIBILITY_DOMAIN_GREYMATTER:status" \
@@ -156,11 +161,38 @@ sudo /usr/libexec/PlistBuddy -c "Print :OS_ELIGIBILITY_DOMAIN_GREYMATTER:status"
 ```
 
 `2` 表示不满足、`3` 表示满足，但个别输入为 2 不一定导致整个域失败，最终以 GREYMATTER 的 answer
-为准。改完对应设置后运行 `sudo launchctl kickstart -k system/com.apple.eligibilityd`，或者重启。
+为准。改完对应设置后，在项目目录运行 `sudo ./install.sh refresh`。
+
+### 恢复 SIP 后资格回到 2（文件未锁定）
+
+如果 `region=LL/A`、文件没有 `uchg/schg`，但 `DEVICE_REGION_CODE=2`，可能是资格服务在
+kext 修改区域之前启动，保留了旧地区结果。`csrutil enable --without kext` 并不保证允许
+`launchctl kickstart -k system/com.apple.eligibilityd`，它仍可能报 SIP 错误 150。
+旧脚本会吞掉这个错误，仅凭区域为 LL/A 就打印刷新成功。
+类似反馈见 [#92](https://github.com/SkyBlue997/enableMacosAI/issues/92)（评论已提出先手动终止进程）、
+[#126](https://github.com/SkyBlue997/enableMacosAI/issues/126) 和
+[#131](https://github.com/SkyBlue997/enableMacosAI/issues/131)。
+
+在本项目目录执行：
+
+```bash
+sudo ./install.sh refresh
+```
+
+安装器与开机脚本共用同一流程：对运行中的资格服务发送 `TERM`，等待旧进程退出，再发送
+`AFLanguageCodeDidChangeDarwinNotification`。这是该服务订阅的按需启动事件，不修改实际语言设置。
+仅终止服务不够，因为它不一定自行重新启动；此时读 plist 仍可能得到旧结果。
+脚本会检查新 PID 和资格文件更新，并最多等待 30 秒让资格重算；超时、通知失败或文件锁定会明确报错。
+模型服务的刷新失败也会记录原始错误，不再笼统声称所有 AI 服务刷新成功。
+
+`refresh` 只处理当前会话。要让开机使用修正后的流程，更新项目后执行一次 `sudo ./install.sh`，
+将新版加载脚本复制到 `/usr/local/bin/region-kext-load.sh`。下次重启后用 `status` 与
+`/var/log/region-kext.log` 验证，成功日志应包含 `OK: region=LL/A, GREYMATTER=4`。
 
 ### 资格文件被锁定
 
 症状：`region=LL/A`，但 `DEVICE_REGION_CODE` 仍是 2，或者重启后又回退。
+**此症状本身不能证明文件锁定**；先看 `status` / `diagnose` 是否实际检测到 `uchg/schg`，没有则参考上一节。
 
 旧教程常让人 `chflags uchg` 锁定资格文件。锁住后 eligibilityd 写不进新结果，`status` / `diagnose`
 读到的是锁定那天的旧值，可能一直是 2，也可能是一个过时的 4。现在 `status` 和 `diagnose` 发现这种
@@ -170,16 +202,18 @@ sudo /usr/libexec/PlistBuddy -c "Print :OS_ELIGIBILITY_DOMAIN_GREYMATTER:status"
 eligibilityd 通过替换文件写入。
 
 ```bash
-cd /private/var/db
-sudo chflags nouchg,noschg eligibilityd/* os_eligibility/eligibility.plist
-ls -lO eligibilityd os_eligibility        # 第 5 列应为 "-"，没有 uchg / schg
-sudo chown _eligibilityd:_eligibilityd eligibilityd os_eligibility   # 仅当目录属主被改过时需要
-sudo launchctl kickstart -k system/com.apple.eligibilityd
+# 在项目目录执行，避免 cd /private/var/db 后找不到 install.sh
+sudo chflags nouchg,noschg /private/var/db/eligibilityd/* /private/var/db/os_eligibility/eligibility.plist
+ls -lO /private/var/db/eligibilityd /private/var/db/os_eligibility  # 应无 uchg / schg
+# 仅当目录属主被改过时需要：
+# sudo chown _eligibilityd:_eligibilityd /private/var/db/eligibilityd /private/var/db/os_eligibility
+sudo ./install.sh refresh
 sudo ./install.sh status
 ```
 
-`chflags` 报 `Operation not permitted` 时，先给「终端」开「完全磁盘访问权限」再试。仍不行说明带了
-`schg`，需要进恢复模式临时 `csrutil disable` 后解锁，完成后再恢复原来的 SIP 设置（[#20](https://github.com/SkyBlue997/enableMacosAI/issues/20)）。
+`chflags` 报 `Operation not permitted` 时，先给「终端」开「完全磁盘访问权限」再试。若确认带有
+`schg` 且仍无法解锁，需要进恢复模式临时 `csrutil disable` 后解锁，完成后再恢复原来的 SIP 设置
+（[#20](https://github.com/SkyBlue997/enableMacosAI/issues/20)）。恢复后仍回退时，检查上一节的服务刷新流程。
 
 ### PCC 云端功能报错（写作工具语气改写、图乐园、Siri 联网回答等）
 
